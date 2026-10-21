@@ -35,7 +35,9 @@ test('повний цикл: втрата зв\'язку -> відновленн
   assert.equal((await Router.findOne()).status, 'ONLINE');
 
   state.offline = true;
-  await monitor.tick(); now += 30 * 60 * 1000;          // 30 хв без зв'язку
+  await monitor.tick(); now += 5000;                    // перша невдала перевірка — ще не аварія
+  assert.equal((await Router.findOne()).status, 'ONLINE');
+  await monitor.tick(); now += 30 * 60 * 1000 - 5000;   // друга поспіль — аварія підтверджена; разом 30 хв
   assert.equal((await Router.findOne()).status, 'OFFLINE');
 
   state.offline = false; state.uptime = 7200 + 1800;    // uptime не скидався => провайдер
@@ -57,9 +59,28 @@ test('роутер без UPnP: вердикт виносить ML-класиф�
   const monitor = new Monitor({ notifier: null, adapterFactory: fakeFactory(state), now: () => now, log: { error() {} } });
   await Router.create({ name: 'Салон', ip: '10.0.0.2', type: 'SNMP' });
   for (let i = 0; i < 3; i++) { await monitor.tick(); now += 5000; }
-  state.offline = true; await monitor.tick(); now += 3 * 3600 * 1000;
+  state.offline = true; await monitor.tick(); now += 5000; await monitor.tick(); now += 3 * 3600 * 1000 - 5000;
   state.offline = false; await monitor.tick();
   const ev = await EventLog.findOne();
   assert.equal(ev.method, 'ml');
   assert.ok(ev.features && typeof ev.features.log_downtime === 'number');
+});
+
+test('BUG-10: поодинока втрачена перевірка не створює інцидент (захист від флапінгу)', async t => {
+  if (!available) return t.skip('MongoDB недоступна');
+  await mongoose.connection.dropDatabase();
+  let now = Date.parse('2026-10-20T12:00:00');
+  const state = { offline: false, uptime: 5000 };
+  const sent = [];
+  const notifier = { alert: () => sent.push('alert'), postMortem: () => sent.push('pm'), degradation: () => {} };
+  const monitor = new Monitor({ notifier, adapterFactory: fakeFactory(state), now: () => now, log: { error() {} } });
+  await Router.create({ name: 'Магазин', ip: '10.0.0.3', type: 'UPNP' });
+  for (let i = 0; i < 3; i++) { await monitor.tick(); now += 5000; }
+  for (let i = 0; i < 4; i++) {                          // чотири поодинокі втрати, розділені успішними перевірками
+    state.offline = true; await monitor.tick(); now += 5000;
+    state.offline = false; await monitor.tick(); now += 5000;
+  }
+  assert.equal(await EventLog.countDocuments(), 0);
+  assert.deepEqual(sent, []);
+  assert.equal((await Router.findOne()).status, 'ONLINE');
 });

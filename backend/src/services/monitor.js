@@ -9,6 +9,7 @@ const HISTORY_MS = 60 * 60 * 1000;     // скільки історії затр
 const BEFORE_MS = 2 * 60 * 1000;       // вікно «перед збоєм» (2 хв)
 const PEER_WINDOW_MS = 2 * 60 * 1000;  // одночасними вважаємо збої з різницею старту до 2 хв
 const DEGRADATION_COOLDOWN_MS = 10 * 60 * 1000;
+const CONFIRM_FAILS = 2;               // скільки невдалих перевірок поспіль означає аварію
 
 class Monitor {
   constructor({ notifier, adapterFactory = AdapterFactory, now = () => Date.now(), log = console } = {}) {
@@ -19,6 +20,7 @@ class Monitor {
     this.history = new Map();     // routerId -> [{t, latency|null}]
     this.live = new Map();        // routerId -> остання телеметрія (для фронтенду)
     this.lastDegradation = new Map();
+    this.pending = new Map();     // routerId -> {since, fails} — ще не підтверджені втрати зв'язку
   }
 
   remember(routerId, latency) {
@@ -64,6 +66,7 @@ class Monitor {
       const a = this.detector.update(id, data.pingLatency);
       this.live.set(id, { ...data, anomaly: a.anomaly, z: a.z, degraded: a.degraded });
       this.remember(id, data.pingLatency);
+      this.pending.delete(id);          // поодинока втрачена перевірка — не аварія, лише втрата в статистиці (BUG-10)
 
       if (this.outages.has(id)) {                       // зв'язок відновився — аналізуємо інцидент
         const { startedAt } = this.outages.get(id);
@@ -91,20 +94,26 @@ class Monitor {
       await Telemetry.create({ routerId: router._id, pingLatency: data.pingLatency, cpuLoad: data.cpuLoad,
         freeMemory: data.freeMemory, uptime: data.uptime, anomaly: a.anomaly, z: a.z });
     } catch (err) {
-      if (err.message !== 'OFFLINE' && !/OFFLINE/.test(err.message)) this.log.error?.('Помилка опитування', id, err.message);
+      if (!/OFFLINE/.test(err.message)) this.log.error?.('Помилка опитування', id, err.message);
       this.remember(id, null);
       this.live.delete(id);
-      if (!this.outages.has(id)) {
-        // після перезапуску сервера роутер може вже бути OFFLINE у БД — відлік ведемо з поточного моменту
-        const startedAt = this.now();
-        this.outages.set(id, { startedAt });
-        this.recentStarts.push({ routerId: id, area: router.area, isp: router.isp, startedAt });
-        this.recentStarts = this.recentStarts.filter(s => s.startedAt > startedAt - 24 * 3600 * 1000);
-        if (router.status !== 'OFFLINE') {
-          router.status = 'OFFLINE';
-          await router.save();
-          this.notifier?.alert(router);
-        }
+      if (this.outages.has(id)) return;
+      // Аварію підтверджуємо лише після CONFIRM_FAILS невдалих перевірок поспіль (≤ 10 с при опитуванні раз на 5 с),
+      // але відлік тривалості ведемо від першої невдалої перевірки.
+      const p = this.pending.get(id) || { since: this.now(), fails: 0 };
+      p.fails += 1;
+      this.pending.set(id, p);
+      if (p.fails < CONFIRM_FAILS) return;
+      this.pending.delete(id);
+      const startedAt = p.since;
+      this.outages.set(id, { startedAt });
+      this.recentStarts.push({ routerId: id, area: router.area, isp: router.isp, startedAt });
+      this.recentStarts = this.recentStarts.filter(s => s.startedAt > startedAt - 24 * 3600 * 1000);
+      // після перезапуску сервера роутер може вже бути OFFLINE у БД — тоді тривогу не дублюємо
+      if (router.status !== 'OFFLINE') {
+        router.status = 'OFFLINE';
+        await router.save();
+        this.notifier?.alert(router);
       }
     }
   }
