@@ -1,84 +1,110 @@
 const net = require('net');
-const os = require('os'); // Системний модуль для реальних метрик
+const os = require('os');
+const axios = require('axios');
 
-// Глобальний об'єкт для збереження часу старту
-if (!global.virtualBootTimes) global.virtualBootTimes = {};
+// Патерн Adapter: кожен тип пристрою має однаковий інтерфейс getTelemetry().
+// uptime === null означає, що лічильник роботи роутера недоступний (UPnP вимкнено) —
+// у такому разі причину збою визначає ML-класифікатор за непрямими ознаками.
 
 class RealSohoAdapter {
-  constructor(ip) {
+  constructor(ip, { upnpControlUrl } = {}) {
     this.ip = ip;
+    this.upnpControlUrl = upnpControlUrl;
   }
 
-  // Справжнє вимірювання затримки мережевого пакету (Ping у мілісекундах)
-  async checkIcmpConnection() {
+  // Вимірювання затримки встановленням TCP-з'єднання з портом 80 (ICMP потребує прав адміністратора)
+  async measureLatency(timeoutMs = 2000) {
     const startTime = Date.now();
     return new Promise((resolve, reject) => {
       const socket = new net.Socket();
-      socket.setTimeout(2000); 
-      
-      socket.on('connect', () => {
-        const latency = Date.now() - startTime; // Скільки мс йшов запит
-        socket.destroy();
-        resolve(latency); 
-      });
-      
-      socket.on('timeout', () => {
-        socket.destroy();
-        reject(new Error('OFFLINE')); 
-      });
-      
-      socket.on('error', () => {
-        socket.destroy();
-        reject(new Error('OFFLINE'));
-      });
-      
+      socket.setTimeout(timeoutMs);
+      socket.on('connect', () => { socket.destroy(); resolve(Date.now() - startTime); });
+      socket.on('timeout', () => { socket.destroy(); reject(new Error('OFFLINE')); });
+      socket.on('error', () => { socket.destroy(); reject(new Error('OFFLINE')); });
       socket.connect(80, this.ip);
     });
   }
 
-  async getTelemetry() {
+  // UPnP IGD: SOAP-запит GetStatusInfo повертає NewUptime — час роботи WAN-з'єднання роутера, с
+  async readUptime() {
+    if (!this.upnpControlUrl) return null;
+    const body = '<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+      + 's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+      + '<u:GetStatusInfo xmlns:u="urn:schemas-upnp-org:service:WANIPConnection:1"/></s:Body></s:Envelope>';
     try {
-      // 1. Отримуємо реальний пінг
-      const pingLatency = await this.checkIcmpConnection();
-      const now = Date.now();
-
-      // 2. Логіка Uptime
-      if (!global.virtualBootTimes[this.ip]) {
-        global.virtualBootTimes[this.ip] = now - (65 * 1000); 
-      }
-      const uptime = Math.floor((now - global.virtualBootTimes[this.ip]) / 1000);
-
-      // 3. Збираємо РЕАЛЬНІ фізичні дані системи (замість закритого роутера)
-      // Беремо навантаження на ядро (loadavg) та переводимо у відсотки
-      const cpuLoad = Math.floor(os.loadavg()[0] * 10) || 5; 
-      const freeMemory = Math.floor(os.freemem() / (1024 * 1024)); // Вільна пам'ять у Мегабайтах
-
-      // 4. Детермінований трафік (залежить від часу доби, утворює плавну хвилю без рандому)
-      const timeSec = now / 1000;
-      const downloadSpeed = (Math.abs(Math.sin(timeSec)) * 50 + 10).toFixed(1);
-      const uploadSpeed = (Math.abs(Math.cos(timeSec)) * 20 + 5).toFixed(1);
-
-      return {
-        uptime: uptime,
-        cpuLoad: cpuLoad, 
-        freeMemory: freeMemory,
-        temperature: 45, // Статична норма (без датчика)
-        downloadSpeed: downloadSpeed,
-        uploadSpeed: uploadSpeed,
-        pingLatency: pingLatency, 
-        activePorts: 4
-      };
-      
-    } catch (error) {
-      throw new Error('Router is OFFLINE');
+      const res = await axios.post(this.upnpControlUrl, body, {
+        timeout: 2000,
+        headers: { 'Content-Type': 'text/xml; charset="utf-8"',
+          SOAPAction: '"urn:schemas-upnp-org:service:WANIPConnection:1#GetStatusInfo"' },
+      });
+      const m = /<NewUptime>(\d+)<\/NewUptime>/.exec(res.data);
+      return m ? Number(m[1]) : null;
+    } catch {
+      return null;
     }
+  }
+
+  async getTelemetry() {
+    const pingLatency = await this.measureLatency();
+    const uptime = await this.readUptime();
+    // Навантаження та пам'ять сервера моніторингу (роутер ці дані не віддає без SNMP)
+    const cpuLoad = Math.min(100, Math.round((os.loadavg()[0] / os.cpus().length) * 100));
+    const freeMemory = Math.floor(os.freemem() / (1024 * 1024));
+    return { uptime, pingLatency, cpuLoad, freeMemory };
+  }
+}
+
+// Симулятор маршрутизатора для демонстрації та тестування сценаріїв збою без реального обладнання.
+class SimulatedAdapter {
+  static devices = new Map();
+
+  constructor(id, { now = () => Date.now(), random = Math.random } = {}) {
+    this.id = String(id);
+    this.now = now;
+    this.random = random;
+    if (!SimulatedAdapter.devices.has(this.id)) {
+      SimulatedAdapter.devices.set(this.id, { bootAt: now() - 3600 * 1000, baseLatency: 15 + random() * 15, scenario: null });
+    }
+  }
+
+  get dev() { return SimulatedAdapter.devices.get(this.id); }
+
+  /** Запускає сценарій: 'POWER_OUTAGE' | 'ISP_OUTAGE' | 'DEVICE_FAULT' | 'DEGRADATION'. */
+  static startScenario(id, kind, durationSec) {
+    const d = SimulatedAdapter.devices.get(String(id));
+    if (!d) throw new Error('Невідомий симульований пристрій');
+    const now = Date.now();
+    const warmup = kind === 'ISP_OUTAGE' ? 60 : 0;    // аварія провайдера: спершу хвилина деградації
+    d.scenario = { kind, degradeFrom: now, downFrom: now + warmup * 1000, downTo: now + (warmup + durationSec) * 1000 };
+  }
+
+  async getTelemetry() {
+    const d = this.dev; const t = this.now(); const s = d.scenario;
+    let latency = d.baseLatency + (this.random() - 0.5) * 4;
+    if (s) {
+      if (t >= s.downFrom && t < s.downTo && s.kind !== 'DEGRADATION') throw new Error('OFFLINE');
+      if (t >= s.downTo) {
+        if (s.kind === 'POWER_OUTAGE' || s.kind === 'DEVICE_FAULT') d.bootAt = s.downTo;  // роутер перезавантажився
+        d.scenario = null;
+      } else if (s.kind === 'ISP_OUTAGE' || s.kind === 'DEGRADATION') {
+        latency = d.baseLatency * (2.5 + this.random() * 2) + this.random() * 40;
+        if (s.kind === 'ISP_OUTAGE' && this.random() < 0.25) throw new Error('OFFLINE');  // втрати пакетів перед аварією
+      }
+    }
+    return {
+      uptime: Math.floor((t - d.bootAt) / 1000),
+      pingLatency: Math.round(latency),
+      cpuLoad: Math.round(20 + this.random() * 15),
+      freeMemory: 512 - Math.round(this.random() * 50),
+    };
   }
 }
 
 class AdapterFactory {
-  static create(type, ip, credentials) {
-    return new RealSohoAdapter(ip);
+  static create(router) {
+    if (router.type === 'SIM') return new SimulatedAdapter(router._id);
+    return new RealSohoAdapter(router.ip, { upnpControlUrl: router.upnpControlUrl });
   }
 }
 
-module.exports = AdapterFactory;
+module.exports = { AdapterFactory, RealSohoAdapter, SimulatedAdapter };
