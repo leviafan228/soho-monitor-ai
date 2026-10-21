@@ -58,8 +58,9 @@ class RealSohoAdapter {
 class SimulatedAdapter {
   static devices = new Map();
 
-  constructor(id, { now = () => Date.now(), random = Math.random } = {}) {
+  constructor(id, { now = () => Date.now(), random = Math.random, upnp = true } = {}) {
     this.id = String(id);
+    this.upnp = upnp;
     this.now = now;
     this.random = random;
     if (!SimulatedAdapter.devices.has(this.id)) {
@@ -92,7 +93,7 @@ class SimulatedAdapter {
       }
     }
     return {
-      uptime: Math.floor((t - d.bootAt) / 1000),
+      uptime: this.upnp ? Math.floor((t - d.bootAt) / 1000) : null,   // без UPnP лічильник недоступний
       pingLatency: Math.round(latency),
       cpuLoad: Math.round(20 + this.random() * 15),
       freeMemory: 512 - Math.round(this.random() * 50),
@@ -102,7 +103,7 @@ class SimulatedAdapter {
 
 class AdapterFactory {
   static create(router) {
-    if (router.type === 'SIM') return new SimulatedAdapter(router._id);
+    if (router.type === 'SIM') return new SimulatedAdapter(router._id, { upnp: Boolean(router.upnpControlUrl) });
     return new RealSohoAdapter(router.ip, { upnpControlUrl: router.upnpControlUrl });
   }
 }

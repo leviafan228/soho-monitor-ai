@@ -19,7 +19,7 @@ function validateRouter(body = {}) {
       errors.push(`Поле ${f}: рядок до 60 символів без спецсимволів`);
     }
   }
-  if (body.upnpControlUrl && !/^https?:\/\/[^\s]+$/.test(body.upnpControlUrl)) errors.push('upnpControlUrl має бути http(s)-адресою');
+  if (body.upnpControlUrl && !/^(https?|sim):\/\/[^\s]+$/.test(body.upnpControlUrl)) errors.push('upnpControlUrl має бути http(s)-адресою');
   return errors;
 }
 

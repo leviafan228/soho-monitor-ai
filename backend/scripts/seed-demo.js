@@ -12,7 +12,7 @@ const USERS = [
 ];
 
 const ROUTERS = [
-  { name: 'Кав\'ярня «Зерно»', ip: '10.10.0.1', type: 'SIM', isp: 'Київстар', area: 'Черга 2' },
+  { name: 'Кав\'ярня «Зерно»', ip: '10.10.0.1', type: 'SIM', isp: 'Київстар', area: 'Черга 2', upnpControlUrl: 'sim://upnp' },
   { name: 'Салон краси «Ліра»', ip: '10.10.0.2', type: 'SIM', isp: 'Воля', area: 'Черга 2' },
   { name: 'Магазин «Еко»', ip: '10.10.0.3', type: 'SIM', isp: 'Київстар', area: 'Черга 5' },
 ];
