@@ -52,9 +52,32 @@ const SettingsSchema = new mongoose.Schema({
   value: Object,
 });
 
+const UserSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  name: String,
+  role: { type: String, enum: ['viewer', 'operator', 'admin'], default: 'viewer' },
+  passwordHash: { type: String, required: true },   // scrypt + сіль; пароль у відкритому вигляді не зберігається
+  active: { type: Boolean, default: true },
+  lastLoginAt: Date,
+}, { timestamps: true });
+UserSchema.set('toJSON', { transform: (doc, ret) => { delete ret.passwordHash; return ret; } });
+
+// Журнал аудиту: хто, що і коли зробив. Зберігається 180 днів.
+const AuditLogSchema = new mongoose.Schema({
+  timestamp: { type: Date, default: Date.now },
+  action: String,          // LOGIN_SUCCESS, LOGIN_FAILED, ROUTER_CREATE, ROUTER_DELETE, SETTINGS_CHANGE, ...
+  severity: { type: String, enum: ['low', 'medium', 'high'], default: 'low' },
+  userEmail: String,
+  ip: String,
+  details: Object,
+});
+AuditLogSchema.index({ timestamp: 1 }, { expireAfterSeconds: 180 * 24 * 3600 });
+
 module.exports = {
   Router: mongoose.model('Router', RouterSchema),
   Telemetry: mongoose.model('Telemetry', TelemetrySchema),
   EventLog: mongoose.model('EventLog', EventLogSchema),
   Settings: mongoose.model('Settings', SettingsSchema),
+  User: mongoose.model('User', UserSchema),
+  AuditLog: mongoose.model('AuditLog', AuditLogSchema),
 };

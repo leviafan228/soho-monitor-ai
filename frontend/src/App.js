@@ -28,7 +28,42 @@ export const formatDuration = (sec) => {
   return [h ? `${h} год` : '', m ? `${m} хв` : '', `${r} сек`].filter(Boolean).join(' ');
 };
 
-function App() {
+const ROLE_LABEL = { admin: 'адміністратор', operator: 'оператор', viewer: 'спостерігач' };
+
+export function Login({ onLogin }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [err, setErr] = useState('');
+  const submit = async (e) => {
+    e.preventDefault();
+    try {
+      const { data } = await axios.post(`${API}/api/auth/login`, { email, password });
+      onLogin(data);
+    } catch (ex) {
+      setErr(ex.response?.data?.error || "Немає з'єднання з сервером");
+    }
+  };
+  const box = { maxWidth: '360px', margin: '12vh auto', background: '#fff', padding: '32px', borderRadius: '14px',
+    boxShadow: '0 10px 30px rgba(0,0,0,0.08)', fontFamily: '"Segoe UI", sans-serif' };
+  const input = { width: '100%', boxSizing: 'border-box', padding: '10px 12px', margin: '6px 0 14px', borderRadius: '8px', border: '1px solid #cbd5e1', fontSize: '15px' };
+  return (
+    <div style={{ background: '#f8fafc', minHeight: '100vh', padding: '1px' }}>
+      <form style={box} onSubmit={submit}>
+        <h2 style={{ marginTop: 0 }}>Центр моніторингу SOHO</h2>
+        <p style={{ color: '#64748b', marginTop: 0 }}>Вхід до системи</p>
+        <label>Email<input style={input} type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="username" required /></label>
+        <label>Пароль<input style={input} type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" required /></label>
+        {err && <p style={{ color: '#dc2626', marginTop: 0 }}>{err}</p>}
+        <button style={{ width: '100%', background: '#0f172a', color: '#fff', border: 'none', padding: '11px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' }}>Увійти</button>
+      </form>
+    </div>
+  );
+}
+
+export function App({ session, onLogout = () => {} }) {
+  const role = session?.user?.role || 'viewer';
+  const canOperate = role === 'operator' || role === 'admin';
+  const isAdmin = role === 'admin';
   const [routers, setRouters] = useState([]);
   const [telemetryMap, setTelemetryMap] = useState({});
   const [events, setEvents] = useState([]);
@@ -64,9 +99,10 @@ function App() {
       setEvents((await axios.get(`${API}/api/events`)).data);
       setError('');
     } catch (e) {
+      if (e.response?.status === 401) return onLogout();
       setError("Немає з'єднання з сервером моніторингу");
     }
-  }, []);
+  }, [onLogout]);
 
   useEffect(() => {
     fetchData();
@@ -77,9 +113,9 @@ function App() {
 
   const saveTelegramSettings = async () => {
     try {
-      await axios.post(`${API}/api/settings/telegram`, { chatId: tgId, interval: tgInterval });
+      await axios.post(`${API}/api/settings/telegram`, { ...(tgId.trim() ? { chatId: tgId.trim() } : {}), interval: Number(tgInterval) });
       alert('Налаштування Telegram оновлено');
-    } catch { alert('Помилка збереження налаштувань'); }
+    } catch (e) { alert(e.response?.data?.error || 'Помилка збереження налаштувань'); }
   };
 
   const handleAddRouter = async () => {
@@ -98,6 +134,13 @@ function App() {
       await axios.delete(`${API}/api/routers/${id}`);
       fetchData();
     }
+  };
+
+  const exportCsv = async () => {
+    const { data } = await axios.get(`${API}/api/export/events.csv`, { responseType: 'blob' });
+    const url = URL.createObjectURL(data);
+    Object.assign(document.createElement('a'), { href: url, download: 'events.csv' }).click();
+    URL.revokeObjectURL(url);
   };
 
   const runScenario = async (id, kind) => {
@@ -151,9 +194,14 @@ function App() {
           {mlInfo && <> · модель v{mlInfo.version}, F1 = {mlInfo.metrics.f1_macro}</>}
         </p>
         {error && <p style={{ color: '#dc2626', fontWeight: 'bold' }}>{error}</p>}
+        <div style={{ marginTop: '8px', fontSize: '14px', color: '#475569' }}>
+          {session?.user?.email} · роль: <b>{ROLE_LABEL[role]}</b>
+          {canOperate && <> · <button style={styles.btnSmall} onClick={exportCsv}>експорт журналу CSV</button></>}
+          {' '}· <button style={styles.btnSmall} onClick={onLogout}>вийти</button>
+        </div>
       </div>
 
-      <div style={styles.tgCard}>
+      {isAdmin && <div style={styles.tgCard}>
         <strong style={{ color: '#0369a1' }}>🛰 Telegram-звіти:</strong>
         <input style={{ ...styles.input, maxWidth: '170px' }} placeholder="Chat ID" value={tgId} onChange={e => setTgId(e.target.value)} />
         <select style={{ ...styles.input, maxWidth: '180px' }} value={tgInterval} onChange={e => setTgInterval(e.target.value)}>
@@ -163,7 +211,7 @@ function App() {
           <option value="300">Кожні 5 хвилин</option>
         </select>
         <button style={{ ...styles.btnPrimary, backgroundColor: '#0369a1' }} onClick={saveTelegramSettings}>Зберегти</button>
-      </div>
+      </div>}
 
       <button style={{ ...styles.btnPrimary, backgroundColor: '#3b82f6', marginBottom: '20px' }} onClick={() => setShowScenarios(!showScenarios)}>
         {showScenarios ? '▼ Сховати опис методу' : '▶ Як система визначає причину збою'}
@@ -178,7 +226,7 @@ function App() {
         </div>
       )}
 
-      <div style={styles.formCard}>
+      {canOperate && <div style={styles.formCard}>
         <input style={styles.input} placeholder="Назва об'єкта" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} />
         <input style={styles.input} placeholder="IP-адреса" value={form.ip} onChange={e => setForm({ ...form, ip: e.target.value })} />
         <input style={styles.input} placeholder="Провайдер" value={form.isp} onChange={e => setForm({ ...form, isp: e.target.value })} />
@@ -190,7 +238,7 @@ function App() {
           <option value="SIM">Симулятор</option>
         </select>
         <button style={styles.btnPrimary} onClick={handleAddRouter}>+ Додати</button>
-      </div>
+      </div>}
 
       <div style={styles.grid}>
         {routers.map(router => {
@@ -202,7 +250,7 @@ function App() {
             <div key={router._id} style={{ ...styles.routerCard, borderTopColor: isOnline ? (live.degraded ? '#f59e0b' : '#10b981') : '#ef4444' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
                 <h3 style={{ margin: '0 0 6px' }}>{router.name} <span style={{ color: '#64748b', fontWeight: 400 }}>({router.ip})</span></h3>
-                <button style={{ border: 'none', background: 'none', color: '#dc2626', cursor: 'pointer' }} onClick={() => handleDeleteRouter(router._id)}>видалити</button>
+                {isAdmin && <button style={{ border: 'none', background: 'none', color: '#dc2626', cursor: 'pointer' }} onClick={() => handleDeleteRouter(router._id)}>видалити</button>}
               </div>
               <div style={{ fontSize: '13px', color: '#64748b', marginBottom: '10px' }}>
                 {router.type}{router.isp && ` · ${router.isp}`}{router.area && ` · ${router.area}`}
@@ -235,7 +283,7 @@ function App() {
                 <Line data={getChartData(router._id)} options={chartOptions} />
               </div>
 
-              {router.type === 'SIM' && (
+              {router.type === 'SIM' && isAdmin && (
                 <div style={{ marginTop: '10px', display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
                   <span style={{ fontSize: '12px', color: '#64748b' }}>Симулювати:</span>
                   <button style={styles.btnSmall} onClick={() => runScenario(router._id, 'POWER_OUTAGE')}>знеструмлення</button>
@@ -289,4 +337,14 @@ function App() {
   );
 }
 
-export default App;
+const SESSION_KEY = 'soho-session';
+
+export default function Root() {
+  const [session, setSession] = useState(() => {
+    try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch { return null; }
+  });
+  if (axios.defaults) axios.defaults.headers.common.Authorization = session ? `Bearer ${session.token}` : undefined;
+  const login = (data) => { sessionStorage.setItem(SESSION_KEY, JSON.stringify(data)); setSession(data); };
+  const logout = useCallback(() => { sessionStorage.removeItem(SESSION_KEY); setSession(null); }, []);
+  return session ? <App session={session} onLogout={logout} /> : <Login onLogin={login} />;
+}
